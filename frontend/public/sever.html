@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Multi_Streaming_Webcam</title>
+    <style>
+        #videos, #pi-videos { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; padding: 20px; }
+        .video-container, .pi-video-container { text-align: center; position: relative; }
+        video, img { width: 320px; height: 240px; border: 1px solid black; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); object-fit: cover; }
+        .label { position: absolute; top: 5px; left: 10px; font-family: Arial, sans-serif; font-size: 16px; font-weight: bold; color: white; text-shadow: 1px 1px 2px black; z-index: 10; }
+        .user-label { margin-top: 5px; font-family: Arial, sans-serif; font-size: 14px; font-weight: bold; color: #333; }
+        .status-label { position: absolute; top: 5px; right: 10px; font-family: Arial, sans-serif; font-size: 14px; font-weight: bold; color: yellow; text-shadow: 1px 1px 2px black; z-index: 10; }
+        .error-message { color: red; text-align: center; font-family: Arial, sans-serif; margin: 20px; }
+        #debug { color: blue; text-align: center; margin: 10px; }
+    </style>
+</head>
+<body>
+    <h1 style="text-align: center; font-family: Arial, sans-serif;">Máy chủ - Nhiều luồng Webcam</h1>
+    <h2 style="text-align: center; font-family: Arial, sans-serif;">Raspberry Pi Streams</h2>
+    <div id="pi-videos"></div>
+    <h2 style="text-align: center; font-family: Arial, sans-serif;">Webcam Streams</h2>
+    <div id="videos"></div>
+    <div id="error" class="error-message"></div>
+    <div id="debug"></div>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script>
+        const NGROK_URL = "https://0fdf-171-250-162-44.ngrok-free.app".trim();
+        const socket = io(NGROK_URL);
+        const peerConnections = {};
+        const userContainers = {};
+        const piContainers = {};
+        const MAX_USERS = 6;
+        let userCount = 0;
+        let piUserCount = 0;
+        const lastFrames = {};
+
+        window.onload = () => {
+            const videosContainer = document.getElementById('videos');
+            const piVideosContainer = document.getElementById('pi-videos');
+            videosContainer.innerHTML = '';
+            piVideosContainer.innerHTML = '';
+            userCount = 0;
+            piUserCount = 0;
+            Object.keys(userContainers).forEach(clientId => {
+                delete userContainers[clientId];
+            });
+            Object.keys(piContainers).forEach(clientId => {
+                delete piContainers[clientId];
+            });
+            Object.keys(peerConnections).forEach(clientId => {
+                peerConnections[clientId].close();
+                delete peerConnections[clientId];
+            });
+            console.log('Đã dọn dẹp tất cả container và kết nối khi reload trang');
+        };
+
+        socket.on('connect', () => {
+            document.getElementById('debug').innerText = 'Đã kết nối với máy chủ!';
+            console.log('Socket.IO đã kết nối trên server, ID:', socket.id);
+            socket.emit('join', { role: 'server' });
+        });
+
+        socket.on('connect_error', (error) => {
+            document.getElementById('debug').innerText = `Lỗi kết nối: ${error.message}`;
+            console.error('Lỗi kết nối Socket.IO:', error);
+        });
+
+        socket.on('offer', async (data) => {
+            console.log('Nhận offer từ client:', data.clientId);
+            const clientId = data.clientId;
+
+            if (userContainers[clientId]) {
+                console.log(`Client ${clientId} đã có container, tái sử dụng...`);
+                const existingContainer = userContainers[clientId].container;
+
+                if (peerConnections[clientId]) {
+                    peerConnections[clientId].close();
+                    delete peerConnections[clientId];
+                }
+            } else {
+                if (userCount >= MAX_USERS) {
+                    document.getElementById('error').innerText = `Đã đạt số lượng tối đa (${MAX_USERS} người dùng webcam).`;
+                    return;
+                }
+
+                userCount++;
+                console.log('Số lượng user webcam hiện tại:', userCount);
+                const userNumber = userCount;
+
+                const videoContainer = document.createElement('div');
+                videoContainer.className = 'video-container';
+                videoContainer.setAttribute('data-client-id', clientId);
+
+                const video = document.createElement('video');
+                video.id = `video-${clientId}`;
+                video.autoplay = true;
+                video.playsInline = true;
+                video.muted = true;
+                video.style.display = 'block';
+
+                const fallbackImage = document.createElement('img');
+                fallbackImage.id = `img-${clientId}`;
+                fallbackImage.style.display = 'none';
+
+                const label = document.createElement('div');
+                label.id = `label-${clientId}`;
+                label.className = 'label';
+
+                const statusLabel = document.createElement('div');
+                statusLabel.id = `status-${clientId}`;
+                statusLabel.className = 'status-label';
+                statusLabel.innerText = 'Đang kết nối...';
+
+                const userLabel = document.createElement('div');
+                userLabel.className = 'user-label';
+                userLabel.innerText = `Người dùng ${userNumber}`;
+
+                videoContainer.appendChild(video);
+                videoContainer.appendChild(fallbackImage);
+                videoContainer.appendChild(label);
+                videoContainer.appendChild(statusLabel);
+                videoContainer.appendChild(userLabel);
+                document.getElementById('videos').appendChild(videoContainer);
+
+                userContainers[clientId] = { container: videoContainer };
+                console.log('Đã tạo container mới cho client:', clientId);
+            }
+
+            const videoContainer = userContainers[clientId].container;
+            const video = videoContainer.querySelector(`#video-${clientId}`) || document.createElement('video');
+            if (!video.id) {
+                video.id = `video-${clientId}`;
+                video.autoplay = true;
+                video.playsInline = true;
+                video.muted = true;
+                video.style.display = 'block';
+                videoContainer.replaceChild(video, videoContainer.querySelector('video'));
+            }
+
+            const fallbackImage = videoContainer.querySelector(`#img-${clientId}`) || document.createElement('img');
+            if (!fallbackImage.id) {
+                fallbackImage.id = `img-${clientId}`;
+                fallbackImage.style.display = 'none';
+                videoContainer.replaceChild(fallbackImage, videoContainer.querySelector('img'));
+            }
+
+            let label = videoContainer.querySelector(`#label-${clientId}`);
+            if (!label) {
+                label = document.createElement('div');
+                label.id = `label-${clientId}`;
+                label.className = 'label';
+                videoContainer.appendChild(label);
+            }
+
+            const statusLabel = videoContainer.querySelector(`#status-${clientId}`) || document.createElement('div');
+            if (!statusLabel.id) {
+                statusLabel.id = `status-${clientId}`;
+                statusLabel.className = 'status-label';
+                statusLabel.innerText = 'Đang kết nối...';
+                videoContainer.replaceChild(statusLabel, videoContainer.querySelector('.status-label'));
+            }
+
+            const peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' },
+                    { urls: 'stun:stun4.l.google.com:19302' },
+                    { urls: 'stun:stun.services.mozilla.com' },
+                    { urls: 'stun:stun.nextcloud.com:443' },
+                    { urls: 'turn:turn.anyfirewall.com:443?transport=tcp', username: 'webrtc', credential: 'webrtc' },
+                    { urls: 'turn:global.turn.twilio.com:3478?transport=udp', username: 'user', credential: 'pass' },
+                    { urls: 'turn:global.turn.twilio.com:443?transport=tcp', username: 'user', credential: 'pass' }
+                ],
+                iceTransportPolicy: 'all',
+                iceCandidatePoolSize: 30,
+                bundlePolicy: 'max-bundle',
+                rtcpMuxPolicy: 'require'
+            });
+            peerConnections[clientId] = peerConnection;
+
+            peerConnection.ontrack = (event) => {
+                console.log('Nhận luồng video từ client:', clientId, 'Số luồng:', event.streams.length, 'Track kinds:', event.track.kind);
+                if (event.streams.length > 0) {
+                    video.srcObject = event.streams[0];
+                    video.style.display = 'block';
+                    fallbackImage.style.display = 'none';
+                    statusLabel.innerText = '';
+                    video.play().catch(err => {
+                        console.warn('Tự động phát video bị chặn, thử phát lại:', err);
+                        setTimeout(() => video.play().catch(err => console.error('Lỗi phát video sau thử lại:', err)), 500);
+                    });
+                } else {
+                    console.error('Không nhận được luồng video từ client:', clientId);
+                    document.getElementById('error').innerText = `Không nhận được video từ client ${clientId}`;
+                    if (lastFrames[clientId]) {
+                        fallbackImage.src = lastFrames[clientId];
+                        fallbackImage.style.display = 'block';
+                    }
+                }
+            };
+
+            peerConnection.oniceconnectionstatechange = () => {
+                const state = peerConnection.iceConnectionState;
+                console.log('Trạng thái ICE cho client', clientId, ':', state);
+                if (state === 'connected') {
+                    console.log('Kết nối WebRTC thành công với client:', clientId);
+                    statusLabel.innerText = '';
+                } else if (state === 'disconnected') {
+                    console.log('Kết nối WebRTC bị ngắt với client:', clientId);
+                    statusLabel.innerText = 'Ngắt kết nối...';
+                } else if (state === 'failed') {
+                    console.log('Kết nối WebRTC thất bại với client:', clientId);
+                    statusLabel.innerText = 'Kết nối thất bại';
+                }
+            };
+
+            peerConnection.onicegatheringstatechange = () => {
+                console.log('Trạng thái ICE gathering cho client', clientId, ':', peerConnection.iceGatheringState);
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice-candidate', { clientId, candidate: event.candidate });
+                    console.log('Đã gửi ICE candidate cho client:', clientId, 'Candidate:', event.candidate.candidate);
+                }
+            };
+
+            try {
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                socket.emit('answer', { clientId, answer: peerConnection.localDescription });
+                console.log('Đã gửi answer cho client:', clientId);
+            } catch (error) {
+                console.error('Lỗi xử lý offer/answer:', error);
+                document.getElementById('error').innerText = `Lỗi WebRTC: ${error.message}`;
+            }
+        });
+
+        socket.on('ice-candidate', async (data) => {
+            if (data.candidate && peerConnections[data.clientId]) {
+                try {
+                    await peerConnections[data.clientId].addIceCandidate(new RTCIceCandidate(data.candidate));
+                    console.log('Nhận ICE candidate từ client:', data.clientId, 'Candidate:', data.candidate.candidate);
+                } catch (err) {
+                    console.error('Lỗi thêm ICE candidate:', err);
+                    document.getElementById('error').innerText = `Lỗi thêm ICE candidate cho client ${data.clientId}: ${err.message}`;
+                }
+            }
+        });
+
+        socket.on('client-disconnected', (data) => {
+            const disconnectedClientId = data.clientId || data;
+            console.log('Client ngắt kết nối:', disconnectedClientId);
+
+            if (piContainers[disconnectedClientId]) {
+                console.log('Raspberry Pi ngắt kết nối:', disconnectedClientId);
+                const container = piContainers[disconnectedClientId].container;
+                container.remove();
+                delete piContainers[disconnectedClientId];
+                piUserCount--;
+                console.log(`Đã xóa container của Raspberry Pi ${disconnectedClientId}, piUserCount hiện tại: ${piUserCount}`);
+                document.getElementById('debug').innerText = `Raspberry Pi ${disconnectedClientId} ngắt kết nối`;
+                return;
+            }
+
+            if (peerConnections[disconnectedClientId]) {
+                peerConnections[disconnectedClientId].close();
+                delete peerConnections[disconnectedClientId];
+            }
+
+            if (userContainers[disconnectedClientId]) {
+                const container = userContainers[disconnectedClientId].container;
+                container.remove();
+                delete userContainers[disconnectedClientId];
+                userCount--;
+                console.log(`Đã xóa container của user với clientId ${disconnectedClientId}, userCount hiện tại: ${userCount}`);
+            }
+
+            delete lastFrames[disconnectedClientId];
+            document.getElementById('error').innerText = '';
+        });
+
+        socket.on('webcam_frame', (data) => {
+            console.log('Nhận webcam_frame từ client:', data.clientId);
+            lastFrames[data.clientId] = data.frame;
+
+            if (userContainers[data.clientId]) {
+                const fallbackImage = document.getElementById(`img-${data.clientId}`);
+                if (fallbackImage && (!peerConnections[data.clientId] || peerConnections[data.clientId].iceConnectionState !== 'connected')) {
+                    fallbackImage.src = data.frame;
+                    fallbackImage.style.display = 'block';
+                    const video = document.getElementById(`video-${data.clientId}`);
+                    if (video) video.style.display = 'none';
+                }
+            }
+        });
+
+        socket.on('frame', (data) => {
+            console.log('Nhận frame từ server:', data.clientId, 'Type:', data.type, 'Image length:', data.image.length);
+            document.getElementById('debug').innerText = `Nhận frame từ ${data.type} ${data.clientId}`;
+            const clientId = data.clientId;
+
+            if (data.type === 'raspberry_pi') {
+                if (!piContainers[clientId]) {
+                    piUserCount++;
+                    console.log('Số lượng Raspberry Pi hiện tại:', piUserCount);
+                    const piUserNumber = piUserCount;
+
+                    const piVideoContainer = document.createElement('div');
+                    piVideoContainer.className = 'pi-video-container';
+                    piVideoContainer.setAttribute('data-client-id', clientId);
+
+                    const piFrame = document.createElement('img');
+                    piFrame.id = `pi-frame-${clientId}`;
+                    piFrame.src = data.image;
+
+                    const label = document.createElement('div');
+                    label.id = `pi-label-${clientId}`;
+                    label.className = 'label';
+
+                    const userLabel = document.createElement('div');
+                    userLabel.className = 'user-label';
+                    userLabel.innerText = `Raspberry Pi ${piUserNumber}`;
+
+                    piVideoContainer.appendChild(piFrame);
+                    piVideoContainer.appendChild(label);
+                    piVideoContainer.appendChild(userLabel);
+                    document.getElementById('pi-videos').appendChild(piVideoContainer);
+
+                    piContainers[clientId] = { container: piVideoContainer };
+                    console.log('Đã tạo container mới cho Raspberry Pi:', clientId);
+                    document.getElementById('debug').innerText = `Đã tạo khung cho Raspberry Pi ${clientId}`;
+                } else {
+                    const piFrame = document.getElementById(`pi-frame-${clientId}`);
+                    if (piFrame) {
+                        piFrame.src = data.image;
+                        console.log('Đã cập nhật frame cho Raspberry Pi:', clientId);
+                    } else {
+                        console.error('Không tìm thấy pi-frame cho client:', clientId);
+                    }
+                }
+            } else if (data.type === 'webcam') {
+                if (!userContainers[clientId]) {
+                    if (userCount >= MAX_USERS) {
+                        document.getElementById('error').innerText = `Đã đạt số lượng tối đa (${MAX_USERS} người dùng webcam).`;
+                        return;
+                    }
+
+                    userCount++;
+                    console.log('Số lượng user webcam hiện tại:', userCount);
+                    const userNumber = userCount;
+
+                    const videoContainer = document.createElement('div');
+                    videoContainer.className = 'video-container';
+                    videoContainer.setAttribute('data-client-id', clientId);
+
+                    const video = document.createElement('video');
+                    video.id = `video-${clientId}`;
+                    video.autoplay = true;
+                    video.playsInline = true;
+                    video.muted = true;
+                    video.style.display = 'none';
+
+                    const fallbackImage = document.createElement('img');
+                    fallbackImage.id = `img-${clientId}`;
+                    fallbackImage.src = data.image;
+                    fallbackImage.style.display = 'block';
+                    fallbackImage.onerror = () => {
+                        console.error(`Lỗi tải hình ảnh cho client ${clientId}`);
+                        document.getElementById('error').innerText = `Lỗi tải hình ảnh cho client ${clientId}`;
+                    };
+
+                    const label = document.createElement('div');
+                    label.id = `label-${clientId}`;
+                    label.className = 'label';
+
+                    const statusLabel = document.createElement('div');
+                    statusLabel.id = `status-${clientId}`;
+                    statusLabel.className = 'status-label';
+                    statusLabel.innerText = 'Đang kết nối...';
+
+                    const userLabel = document.createElement('div');
+                    userLabel.className = 'user-label';
+                    userLabel.innerText = `Người dùng ${userNumber}`;
+
+                    videoContainer.appendChild(video);
+                    videoContainer.appendChild(fallbackImage);
+                    videoContainer.appendChild(label);
+                    videoContainer.appendChild(statusLabel);
+                    videoContainer.appendChild(userLabel);
+                    document.getElementById('videos').appendChild(videoContainer);
+
+                    userContainers[clientId] = { container: videoContainer };
+                    console.log('Đã tạo container mới cho webcam client:', clientId);
+                    document.getElementById('debug').innerText = `Đã tạo khung cho webcam ${clientId}`;
+                } else {
+                    const fallbackImage = document.getElementById(`img-${clientId}`);
+                    if (fallbackImage && (!peerConnections[clientId] || peerConnections[clientId].iceConnectionState !== 'connected')) {
+                        fallbackImage.src = data.image;
+                        fallbackImage.style.display = 'block';
+                        const video = document.getElementById(`video-${clientId}`);
+                        if (video) video.style.display = 'none';
+                        console.log('Đã cập nhật frame cho webcam client:', clientId);
+                    } else {
+                        console.error('Không tìm thấy fallbackImage hoặc đang kết nối WebRTC cho client:', clientId);
+                    }
+                }
+            }
+        });
+
+        socket.on('prediction_result', (data) => {
+            console.log('Server nhận kết quả dự đoán:', data);
+            const clientId = data.clientId;
+            if (!userContainers[clientId]) {
+                console.error(`Không tìm thấy container cho client ${clientId}`);
+                document.getElementById('error').innerText = `Không tìm thấy container cho client ${clientId}`;
+                return;
+            }
+
+            let label = document.getElementById(`label-${clientId}`);
+            if (!label) {
+                console.error(`Không tìm thấy label cho client ${clientId}, tạo mới...`);
+                const videoContainer = userContainers[clientId].container;
+                label = document.createElement('div');
+                label.id = `label-${clientId}`;
+                label.className = 'label';
+                videoContainer.appendChild(label);
+            }
+
+            if (label) {
+                const resultText = data.result === 'fire' ? `Fire: ( ${data.score.toFixed(2)})` : `Non_Fire (Điểm: ${data.score.toFixed(2)})`;
+                label.innerText = resultText;
+                label.style.color = data.result === 'fire' ? 'red' : 'green';
+                console.log(`Đã cập nhật nhãn cho client ${clientId}: ${resultText}`);
+                document.getElementById('debug').innerText = `Đã cập nhật nhãn cho webcam ${clientId}`;
+            }
+        });
+
+        socket.on('pi_prediction_result', (data) => {
+            console.log('Server nhận kết quả dự đoán từ Raspberry Pi:', data);
+            const clientId = data.clientId;
+
+            if (!piContainers[clientId]) {
+                console.error(`Không tìm thấy container cho Raspberry Pi ${clientId}`);
+                return;
+            }
+
+            const label = document.getElementById(`pi-label-${clientId}`);
+            if (label) {
+                const resultText = data.result === 'fire' ? `Fire: ( ${data.score.toFixed(2)})` : `Non_Fire (Điểm: ${data.score.toFixed(2)})`;
+                label.innerText = resultText;
+                label.style.color = data.result === 'fire' ? 'red' : 'green';
+                console.log(`Đã cập nhật nhãn cho Raspberry Pi ${clientId}: ${resultText}`);
+                document.getElementById('debug').innerText = `Đã cập nhật nhãn cho Raspberry Pi ${clientId}`;
+            }
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Server ngắt kết nối, dọn dẹp tất cả container');
+            const videosContainer = document.getElementById('videos');
+            const piVideosContainer = document.getElementById('pi-videos');
+            videosContainer.innerHTML = '';
+            piVideosContainer.innerHTML = '';
+            userCount = 0;
+            piUserCount = 0;
+            Object.keys(userContainers).forEach(clientId => {
+                delete userContainers[clientId];
+            });
+            Object.keys(piContainers).forEach(clientId => {
+                delete piContainers[clientId];
+            });
+            Object.keys(peerConnections).forEach(clientId => {
+                peerConnections[clientId].close();
+                delete peerConnections[clientId];
+            });
+            document.getElementById('debug').innerText = 'Server ngắt kết nối';
+        });
+    </script>
+</body>
+</html>
